@@ -1,0 +1,141 @@
+#!/bin/bash
+# Claude Code Session End Hook
+# Handles: auto-commit/push, journal entries with summaries, temp cleanup
+# Runs AFTER session ends - zero token impact during session
+#
+# Part of the Project Context Manager system.
+# Install to: ~/.local/bin/claude-session-end
+#
+# Add to ~/.claude/settings.json:
+#   "hooks": {
+#     "Stop": [{
+#       "hooks": [{
+#         "type": "command",
+#         "command": "~/.local/bin/claude-session-end 2>/dev/null || true"
+#       }]
+#     }]
+#   }
+
+# Read JSON input from stdin
+INPUT=$(cat)
+
+# Parse fields from hook input
+CWD=$(echo "$INPUT" | jq -r '.cwd // "~"')
+SID=$(echo "$INPUT" | jq -r '.session_id // ""')
+TRANSCRIPT=$(echo "$INPUT" | jq -r '.transcript_path // ""')
+PROJECT=$(basename "$CWD")
+
+# Change to working directory
+cd "$CWD" || exit 0
+
+# ====================
+# 1. AUTO-COMMIT & PUSH (if in git repo with changes)
+# ====================
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    # Check if there are uncommitted changes
+    if ! git diff-index --quiet HEAD -- 2>/dev/null; then
+        # Get list of changed files for commit message
+        CHANGED_FILES=$(git diff --name-only HEAD | head -5)
+        NUM_FILES=$(git diff --name-only HEAD | wc -l)
+
+        # Stage all changes
+        git add -A
+
+        # Create commit message
+        git commit -m "$(cat <<'EOF'
+Auto-commit: Session end
+
+Changed files:
+${CHANGED_FILES}
+
+Total files: ${NUM_FILES}
+Session: ${SID:0:8}
+Project: ${PROJECT}
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+EOF
+)" 2>/dev/null
+
+        # Push to remote (non-blocking, don't wait for result)
+        nohup git push origin "$(git rev-parse --abbrev-ref HEAD)" >/dev/null 2>&1 &
+    fi
+fi
+
+# ====================
+# 2. JOURNAL ENTRY (append to daily journal with summary)
+# ====================
+JOURNAL_DIR="$HOME/.claude/.context/core/journal"
+TODAY=$(date +%Y-%m-%d)
+JOURNAL_FILE="$JOURNAL_DIR/$TODAY.md"
+
+# Create journal directory if it doesn't exist
+mkdir -p "$JOURNAL_DIR"
+
+# Create journal file with header if it doesn't exist
+if [ ! -f "$JOURNAL_FILE" ]; then
+    cat > "$JOURNAL_FILE" <<EOF
+# Journal - $TODAY
+
+EOF
+fi
+
+# Generate summary from transcript
+SUMMARY=""
+if [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
+    # Try to find journal-summarize script
+    SUMMARIZE_SCRIPT=""
+    if [ -f "$HOME/.local/bin/journal-summarize" ]; then
+        SUMMARIZE_SCRIPT="$HOME/.local/bin/journal-summarize"
+    fi
+
+    if [ -n "$SUMMARIZE_SCRIPT" ]; then
+        SUMMARY=$(TRANSCRIPT_PATH="$TRANSCRIPT" "$SUMMARIZE_SCRIPT" 2>/dev/null)
+    fi
+fi
+
+# Append session entry with summary
+cat >> "$JOURNAL_FILE" <<EOF
+
+## $(date +%H:%M) - Session [$PROJECT]
+- Session ID: ${SID:0:8}
+- Working directory: $CWD
+EOF
+
+# Add summary if we have one
+if [ -n "$SUMMARY" ]; then
+    cat >> "$JOURNAL_FILE" <<EOF
+
+### Changes
+$SUMMARY
+EOF
+fi
+
+# Add blank line at end
+echo "" >> "$JOURNAL_FILE"
+
+# ====================
+# 3. TEMP FILE CLEANUP (remove old files)
+# ====================
+CLEANUP_DIRS=(
+    "$HOME/.claude/paste-cache"
+    "$HOME/.claude/plans"
+    "$HOME/.claude/session-env"
+)
+
+# Clean files older than 7 days
+for DIR in "${CLEANUP_DIRS[@]}"; do
+    if [ -d "$DIR" ]; then
+        find "$DIR" -type f -mtime +7 -delete 2>/dev/null
+    fi
+done
+
+# Clean old todo files (keep only recent 50)
+TODO_DIR="$HOME/.claude/todos"
+if [ -d "$TODO_DIR" ]; then
+    TODO_COUNT=$(find "$TODO_DIR" -type f -name "*.json" | wc -l)
+    if [ "$TODO_COUNT" -gt 50 ]; then
+        find "$TODO_DIR" -type f -name "*.json" -printf '%T+ %p\n' | sort | head -n -50 | cut -d' ' -f2- | xargs rm -f 2>/dev/null
+    fi
+fi
+
+exit 0

@@ -1,0 +1,193 @@
+#!/usr/bin/env python3
+"""
+Journal Summarizer - Extracts meaningful session summary from Claude transcript.
+
+Parses JSONL transcript and generates bullet-point summary of:
+- Files created/modified
+- Key commands run
+- Errors encountered and fixed
+- Major decisions/changes
+
+Input: JSON with transcript_path via stdin, or TRANSCRIPT_PATH env var
+Output: Markdown summary to stdout
+
+Part of the Project Context Manager system.
+"""
+
+import json
+import sys
+import os
+from pathlib import Path
+from collections import defaultdict
+
+
+def parse_transcript(transcript_path: str) -> list:
+    """Parse JSONL transcript file into list of messages."""
+    messages = []
+    try:
+        with open(transcript_path, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        messages.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+    except FileNotFoundError:
+        return []
+    return messages
+
+
+def extract_tool_calls(messages: list) -> dict:
+    """Extract tool calls from assistant messages."""
+    tool_calls = defaultdict(list)
+
+    for msg in messages:
+        if msg.get('type') != 'assistant':
+            continue
+
+        content = msg.get('message', {}).get('content', [])
+        for block in content:
+            if block.get('type') == 'tool_use':
+                tool_name = block.get('name', '')
+                tool_input = block.get('input', {})
+                tool_calls[tool_name].append(tool_input)
+
+    return tool_calls
+
+
+def summarize_file_changes(tool_calls: dict) -> list:
+    """Summarize file operations (Write, Edit)."""
+    changes = []
+
+    # Track files written (created) - use set to deduplicate
+    created_files = set()
+    for call in tool_calls.get('Write', []):
+        path = call.get('file_path', '')
+        if path:
+            filename = Path(path).name
+            created_files.add(filename)
+
+    for filename in sorted(created_files):
+        changes.append(f"Created `{filename}`")
+
+    # Files edited (exclude ones we created)
+    edited_files = set()
+    for call in tool_calls.get('Edit', []):
+        path = call.get('file_path', '')
+        if path:
+            filename = Path(path).name
+            if filename not in created_files:  # Don't double-count
+                edited_files.add(filename)
+
+    for filename in sorted(edited_files):
+        changes.append(f"Modified `{filename}`")
+
+    return changes
+
+
+def summarize_commands(tool_calls: dict) -> list:
+    """Summarize significant bash commands."""
+    summaries = []
+
+    # Keywords indicating significant actions
+    significant_patterns = {
+        'git commit': 'Committed changes',
+        'git push': 'Pushed to remote',
+        'pip install': 'Installed packages',
+        'npm install': 'Installed npm packages',
+        'systemctl restart': 'Restarted service',
+        'systemctl start': 'Started service',
+        'systemctl stop': 'Stopped service',
+        'docker': 'Docker operation',
+        'pytest': 'Ran tests',
+        'npm test': 'Ran npm tests',
+        'npm run build': 'Built project',
+        'make': 'Ran make',
+    }
+
+    seen = set()
+    for call in tool_calls.get('Bash', []):
+        cmd = call.get('command', '')
+        for pattern, summary in significant_patterns.items():
+            if pattern in cmd.lower() and summary not in seen:
+                seen.add(summary)
+                summaries.append(summary)
+
+    return summaries
+
+
+def extract_key_topics(messages: list) -> list:
+    """Extract key topics from user messages."""
+    topics = []
+
+    # Look for first substantial user message as session topic
+    for msg in messages:
+        if msg.get('type') == 'user':
+            content = msg.get('message', {}).get('content', '')
+            if isinstance(content, str) and len(content) > 20:
+                # Truncate long messages
+                topic = content[:100].replace('\n', ' ').strip()
+                if len(content) > 100:
+                    topic += '...'
+                topics.append(topic)
+                break
+
+    return topics
+
+
+def generate_summary(transcript_path: str) -> str:
+    """Generate markdown summary from transcript."""
+    messages = parse_transcript(transcript_path)
+
+    if not messages:
+        return ""
+
+    tool_calls = extract_tool_calls(messages)
+
+    # Gather summary points
+    summary_points = []
+
+    # File changes
+    file_changes = summarize_file_changes(tool_calls)
+    summary_points.extend(file_changes)
+
+    # Commands
+    commands = summarize_commands(tool_calls)
+    summary_points.extend(commands)
+
+    # If no significant actions, try to get topic
+    if not summary_points:
+        topics = extract_key_topics(messages)
+        if topics:
+            summary_points.append(f"Topic: {topics[0]}")
+
+    # Format as markdown
+    if summary_points:
+        return '\n'.join(f"- {point}" for point in summary_points[:10])  # Limit to 10 points
+
+    return ""
+
+
+def main():
+    # Get transcript path from stdin JSON or environment
+    transcript_path = os.environ.get('TRANSCRIPT_PATH', '')
+
+    if not transcript_path:
+        try:
+            input_data = sys.stdin.read()
+            if input_data:
+                data = json.loads(input_data)
+                transcript_path = data.get('transcript_path', '')
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    if not transcript_path:
+        sys.exit(0)
+
+    summary = generate_summary(transcript_path)
+    print(summary)
+
+
+if __name__ == '__main__':
+    main()

@@ -274,11 +274,82 @@ project-context-manager/
     └── journal/
 ```
 
+## Journal Auto-Summary (NEW)
+
+When you end a Claude Code session, the journal can now **automatically summarize what was accomplished** — not just log session metadata.
+
+### What It Captures
+
+- **Files created** - New files you wrote
+- **Files modified** - Existing files you edited
+- **Significant commands** - git commits, deploys, test runs, etc.
+- **Session topics** - When no file changes, captures what you discussed
+
+### Example Journal Entry
+
+Before (metadata only):
+```markdown
+## 14:30 - Session [elle_bot]
+- Session ID: c30e55e4
+- Working directory: /home/ja/projects/bots/elle_bot
+```
+
+After (with auto-summary):
+```markdown
+## 14:30 - Session [elle_bot]
+- Session ID: c30e55e4
+- Working directory: /home/ja/projects/bots/elle_bot
+
+### Changes
+- Created `telegram-reply.sh`
+- Created `process-actions.py`
+- Modified `elle_bot.py`
+- Modified `settings.local.json`
+- Restarted service
+```
+
+### Setup
+
+1. **Install the hooks:**
+   ```bash
+   cd /home/ja/projects/project-context-manager
+   ./install-hooks.sh
+   ```
+
+2. **Enable in Claude Code settings** (`~/.claude/settings.json`):
+   ```json
+   "hooks": {
+     "Stop": [{
+       "hooks": [{
+         "type": "command",
+         "command": "~/.local/bin/claude-session-end 2>/dev/null || true"
+       }]
+     }]
+   }
+   ```
+
+### How It Works
+
+1. Claude Code fires `Stop` hook after each session
+2. Hook receives transcript path in JSON payload
+3. `journal-summarize` parses the JSONL transcript
+4. Extracts tool calls (Write, Edit, Bash) and summarizes
+5. Appends meaningful summary to daily journal
+
+### Files
+
+- `scripts/journal-summarize` - Python script that parses transcripts
+- `scripts/claude-session-end` - Bash hook that writes journal entries
+- `install-hooks.sh` - Installer for the hook scripts
+
+---
+
 ## Requirements
 
 - Python 3.8+
 - Git (optional, for auto-commit features)
 - Claude Code CLI (for using the contexts)
+- `jq` (for parsing JSON in hooks)
 
 ## License
 
